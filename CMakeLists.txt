@@ -33,7 +33,7 @@ set(NGTCP2_VERSION "1.20.0")
 set(NGHTTP3_VERSION "1.15.0")
 set(ZLIB_VERSION "1.3.1")
 set(ZSTD_VERSION "1.5.7")
-set(CURL_VERSION "curl-8_15_0")
+set(CURL_VERSION "curl-8_20_0")
 
 set(ZLIB_URL "https://github.com/madler/zlib/releases/download/v${ZLIB_VERSION}/zlib-${ZLIB_VERSION}.tar.gz")
 set(ZSTD_URL "https://github.com/facebook/zstd/releases/download/v${ZSTD_VERSION}/zstd-${ZSTD_VERSION}.tar.gz")
@@ -203,7 +203,11 @@ ExternalProject_Add(brotli
 set(_boringssl_c_flags "${CMAKE_C_FLAGS}")
 string(APPEND _boringssl_c_flags " -Wno-unknown-warning-option -Wno-stringop-overflow -Wno-array-bounds -Wno-macro-redefined")
 set(_boringssl_cxx_flags "${CMAKE_CXX_FLAGS}")
-string(APPEND _boringssl_cxx_flags " -Wno-macro-redefined")
+# -Wno-deprecated/-Wno-cpp: BoringSSL's bundled googletest is built with -Werror
+# and, on GCC 15 with libstdc++, pulls in <ciso646> which emits a deprecation
+# #warning that -Werror promotes to an error. -Wno-deprecated undefines
+# __DEPRECATED so the header stays silent; -Wno-cpp also suppresses the #warning.
+string(APPEND _boringssl_cxx_flags " -Wno-macro-redefined -Wno-deprecated -Wno-cpp")
 
 set(_boringssl_cmake_args
   ${_common_cmake_args}
@@ -360,12 +364,19 @@ else()
   set(_curl_idn_flags -DUSE_LIBIDN2=OFF)
 endif()
 
-# Single curl build mode: produce shared+static libcurl and static curl binary.
+# Whether to build the curl-impersonate CLI executable. lightpanda only links
+# libcurl-impersonate.a; on the curl 8.20 rebase the src/tool_*.c CLI sources are
+# not reconciled to 8.20's CLI refactor, so the exe won't compile. Build with
+# -DBUILD_CURL_EXE=OFF for a library-only build. Default ON preserves upstream.
+option(BUILD_CURL_EXE "Build the curl-impersonate CLI executable" ON)
+
+# Single curl build mode: produce shared+static libcurl and (optionally) the
+# static curl binary.
 set(_curl_build_flags
   -DBUILD_SHARED_LIBS=ON
   -DBUILD_STATIC_LIBS=ON
-  -DBUILD_STATIC_CURL=ON
-  -DBUILD_CURL_EXE=ON
+  -DBUILD_STATIC_CURL=${BUILD_CURL_EXE}
+  -DBUILD_CURL_EXE=${BUILD_CURL_EXE}
 )
 
 set(_curl_ca_flags)
@@ -548,12 +559,15 @@ add_custom_target(install-all
 
 # Install only runtime artifacts we ship: curl binary, libcurl library, and wrappers.
 # Do not call curl's own install target, which also installs docs/manpages.
-if(WIN32)
-  install(PROGRAMS "${DEPS_BUILD_DIR}/curl/src/curl-impersonate.exe" DESTINATION ${CMAKE_INSTALL_BINDIR})
-elseif(CMAKE_SYSTEM_NAME STREQUAL "iOS")
-  install(PROGRAMS "${DEPS_BUILD_DIR}/curl/src/curl-impersonate.app/curl-impersonate" DESTINATION ${CMAKE_INSTALL_BINDIR})
-else()
-  install(PROGRAMS "${DEPS_BUILD_DIR}/curl/src/curl-impersonate" DESTINATION ${CMAKE_INSTALL_BINDIR})
+# The curl-impersonate binary only exists when BUILD_CURL_EXE is ON.
+if(BUILD_CURL_EXE)
+  if(WIN32)
+    install(PROGRAMS "${DEPS_BUILD_DIR}/curl/src/curl-impersonate.exe" DESTINATION ${CMAKE_INSTALL_BINDIR})
+  elseif(CMAKE_SYSTEM_NAME STREQUAL "iOS")
+    install(PROGRAMS "${DEPS_BUILD_DIR}/curl/src/curl-impersonate.app/curl-impersonate" DESTINATION ${CMAKE_INSTALL_BINDIR})
+  else()
+    install(PROGRAMS "${DEPS_BUILD_DIR}/curl/src/curl-impersonate" DESTINATION ${CMAKE_INSTALL_BINDIR})
+  endif()
 endif()
 if(WIN32)
   install(
@@ -580,13 +594,17 @@ install(
   FILES_MATCHING
     PATTERN "*.h"
 )
-if(WIN32)
-  file(GLOB _curl_wrapper_scripts CONFIGURE_DEPENDS "${CMAKE_SOURCE_DIR}/win/bin/curl_*.bat")
-else()
-  file(GLOB _curl_wrapper_scripts CONFIGURE_DEPENDS "${CMAKE_SOURCE_DIR}/bin/curl_*")
-endif()
-if(_curl_wrapper_scripts)
-  install(PROGRAMS ${_curl_wrapper_scripts} DESTINATION ${CMAKE_INSTALL_BINDIR})
+# The curl_* wrapper scripts invoke the curl-impersonate binary, so only ship
+# them when the executable is built.
+if(BUILD_CURL_EXE)
+  if(WIN32)
+    file(GLOB _curl_wrapper_scripts CONFIGURE_DEPENDS "${CMAKE_SOURCE_DIR}/win/bin/curl_*.bat")
+  else()
+    file(GLOB _curl_wrapper_scripts CONFIGURE_DEPENDS "${CMAKE_SOURCE_DIR}/bin/curl_*")
+  endif()
+  if(_curl_wrapper_scripts)
+    install(PROGRAMS ${_curl_wrapper_scripts} DESTINATION ${CMAKE_INSTALL_BINDIR})
+  endif()
 endif()
 
 configure_file(
